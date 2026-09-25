@@ -59,6 +59,14 @@ def build_summarizer():
     return create_agent(_model(), tools=[], system_prompt=SUMMARIZE_PROMPT)
 
 
+# Constructed at import, not per call. The build-time topology inspector imports the
+# entrypoint module and calls get_graph() on an exported graph; it never invokes
+# factories, so a graph built inside main() is invisible to it and the build records
+# no topology.
+inspector = build_inspector()
+summarizer = build_summarizer()
+
+
 def _last_message(result) -> str:
     return result["messages"][-1].content
 
@@ -66,13 +74,13 @@ def _last_message(result) -> str:
 def main(text: str) -> str:
     """Run both stages and return a report showing each stage's output."""
     inspection = _last_message(
-        build_inspector().invoke(
+        inspector.invoke(
             {"messages": [{"role": "user", "content": f"Inspect this text:\n\n{text}"}]}
         )
     )
 
     brief = _last_message(
-        build_summarizer().invoke(
+        summarizer.invoke(
             {
                 "messages": [
                     {
