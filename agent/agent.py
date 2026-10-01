@@ -9,22 +9,29 @@ The two stages are genuinely chained: stage 2's prompt is built from stage 1's
 output, so a failure in stage 1 is visible in stage 2's result rather than
 silently skipped.
 
-Reads OPENAI_API_KEY / OPENAI_BASE_URL from the environment, which is what the
-OpenAI SDK does by default — no base_url or api_key threaded through code.
+The model is Gemini on Vertex AI, reached through the platform's governance
+gateway. Two constructor arguments are platform-shaped (see _model below); the
+platform injects every value they read, and the sandbox never holds a Google key.
 """
 
 from __future__ import annotations
 
 import os
 
+from google.oauth2.credentials import Credentials
 from langchain.agents import create_agent
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from agent.tools import ALL_TOOLS
 
-# Overridable without a rebuild: which model name the egress proxy accepts
-# varies by environment.
-MODEL = os.environ.get("AGENT_MODEL", "gpt-4o-mini")
+# Overridable without a rebuild: which model the Vertex connector accepts can vary
+# by environment.
+MODEL = os.environ.get("AGENT_MODEL", "gemini-2.5-flash")
+
+# The graphs are built at import, which the build-time topology inspector also does
+# -- without a sandbox's environment. These placeholders let construction succeed
+# there; the inspector never invokes the model, and a real run overrides all three.
+_INSPECTION_ONLY = "topology-inspection-only"
 
 INSPECT_PROMPT = """You are a text inspector with three tools.
 
@@ -45,8 +52,25 @@ FINGERPRINT: the first 12 characters of the SHA-256 digest
 Do not invent figures. If something is missing from the input, write "not reported"."""
 
 
-def _model() -> ChatOpenAI:
-    return ChatOpenAI(model=MODEL)
+def _model() -> ChatGoogleGenerativeAI:
+    """Gemini on Vertex, through the governance gateway.
+
+    - ``credentials``: the run credential the platform injects as
+      TRASE_RUN_CREDENTIAL. It is how the gateway identifies this run; the gateway
+      swaps it for a real Google token upstream, so it never reaches Google. It
+      also keeps google-genai from searching for Google credentials, which a
+      sandbox correctly does not have.
+    - ``base_url``: TRASE_VERTEX_BASE_URL, the gateway's Vertex route. google-genai
+      has no environment variable for its base URL, so it is passed here.
+    """
+    return ChatGoogleGenerativeAI(
+        model=MODEL,
+        vertexai=True,
+        project=os.environ.get("GOOGLE_CLOUD_PROJECT", _INSPECTION_ONLY),
+        location=os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
+        credentials=Credentials(token=os.environ.get("TRASE_RUN_CREDENTIAL", _INSPECTION_ONLY)),
+        base_url=os.environ.get("TRASE_VERTEX_BASE_URL"),
+    )
 
 
 def build_inspector():
