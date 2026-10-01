@@ -1,45 +1,27 @@
-"""Entrypoint shim: point the stock OpenAI SDK at the governed egress proxy.
+"""Entrypoint: read the step input, run both stages, return the report.
 
-The platform injects TRASE_OPENAI_BASE_URL and TRASE_RUN_ID. The OpenAI SDK reads
-OPENAI_BASE_URL and OPENAI_API_KEY. Aliasing the two here keeps the agent itself
-stock -- wrap, don't edit.
+The step's input comes from the platform (``trase_os_sdk.sandbox.read_input``),
+so a query sent from Studio or ``trase-os-sdk run-workflow --query`` reaches the
+agent. The SDK ships in the platform's base image; it is not in requirements.txt.
 
-TRASE_RUN_ID doubles as the run credential, so it is aliased but never logged.
-
-Both the aliasing and the graph export happen at IMPORT time rather than inside
-run(). The build-time topology inspector imports this module, looks for a single
-exported graph, and calls get_graph() on it. It never calls run(), so anything set
-up inside run() does not exist as far as inspection is concerned.
+The graph export happens at IMPORT time rather than inside run(). The build-time
+topology inspector imports this module, looks for a single exported graph, and
+calls get_graph() on it. It never calls run(), so anything set up inside run()
+does not exist as far as inspection is concerned.
 """
 
-import os
+from __future__ import annotations
 
-
-def _configure_openai_environment() -> None:
-    """Alias the platform's variables onto the ones the OpenAI SDK reads.
-
-    Runs at import because the graph below is constructed at import, and
-    ChatOpenAI raises at construction when it cannot resolve an API key.
-    Topology inspection imports this module without runtime credentials and never
-    invokes the graph, so a placeholder stands in; a real run overwrites it with
-    the injected run credential.
-    """
-    base_url = os.environ.get("TRASE_OPENAI_BASE_URL")
-    run_id = os.environ.get("TRASE_RUN_ID")
-    if base_url:
-        os.environ["OPENAI_BASE_URL"] = base_url
-    if run_id:
-        os.environ["OPENAI_API_KEY"] = run_id
-    else:
-        os.environ.setdefault("OPENAI_API_KEY", "topology-inspection-only")
-
-
-_configure_openai_environment()
+import json
+import logging
+from typing import Any
 
 # Exactly ONE graph attribute in this module: the inspector accepts one unambiguous
 # exported graph and reports `unsupported` when it finds several. `summarizer` stays
 # in agent.agent and is deliberately not re-exported here.
-from agent.agent import inspector as agent_graph, main as run_agent  # noqa: E402
+from agent.agent import inspector as agent_graph, main as run_agent  # noqa: F401
+
+log = logging.getLogger(__name__)
 
 DEFAULT_INPUT = (
     "The Antikythera mechanism is an Ancient Greek hand-powered orrery, "
@@ -47,7 +29,44 @@ DEFAULT_INPUT = (
     "It was used to predict astronomical positions and eclipses decades in advance."
 )
 
+# Keys a trigger body may carry the text under. `user_message` is what
+# `trase-os-sdk run-workflow --query` and Studio's manual trigger send.
+_TEXT_KEYS = ("user_message", "query", "text", "input")
+
+
+def _text_from(value: Any) -> str | None:
+    """Pull the text to inspect out of whatever shape the step input has."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        for key in _TEXT_KEYS:
+            text = value.get(key)
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+        return json.dumps(value) if value else None
+    return json.dumps(value)
+
+
+def _step_input() -> str:
+    """The step input from the platform, or the built-in sample when there is none."""
+    try:
+        from trase_os_sdk.sandbox import NoInputError, read_input
+    except ImportError:
+        log.warning("trase_os_sdk not importable: using the built-in sample input")
+        return DEFAULT_INPUT
+    try:
+        text = _text_from(read_input())
+    except NoInputError:
+        log.info("step launched with no input: using the built-in sample input")
+        return DEFAULT_INPUT
+    if text is None:
+        log.info("step input carried no text: using the built-in sample input")
+        return DEFAULT_INPUT
+    return text
+
 
 def run() -> str:
-    """Called by the platform with no arguments."""
-    return run_agent(os.environ.get("AGENT_INPUT") or DEFAULT_INPUT)
+    """Called by the platform with no arguments. The return value is the step output."""
+    return run_agent(_step_input())
